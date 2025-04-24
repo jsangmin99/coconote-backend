@@ -1,6 +1,7 @@
 package com.example.coconote.config.cleanUpConfig;
 
 import com.example.coconote.global.fileUpload.entity.FileEntity;
+import com.example.coconote.global.fileUpload.repository.FileRepository;
 import com.example.coconote.global.fileUpload.service.S3Service;
 import jakarta.persistence.EntityManagerFactory;
 import org.springframework.batch.core.Job;
@@ -22,6 +23,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Configuration
 @EnableBatchProcessing
@@ -39,11 +42,15 @@ public class FileCleanupBatchConfig {
     @Autowired
     private S3Service s3Service;
 
+    @Autowired
+    private FileRepository fileRepository;
+
     @Bean
     public Job fileCleanupJob(JobRepository jobRepository) {
         return new JobBuilder("fileCleanupJob", jobRepository)
                 .incrementer(new RunIdIncrementer())
                 .start(findAndDeleteFilesStep())
+                .next(deleteOrphanS3FilesStep())
                 .build();
     }
 
@@ -90,6 +97,34 @@ public class FileCleanupBatchConfig {
         return new JpaItemWriterBuilder<FileEntity>()
                 .entityManagerFactory(entityManagerFactory)
                 .usePersist(false) //persist 사용하지 않고  merge 사용
+                .build();
+    }
+
+    @Bean
+    public Step deleteOrphanS3FilesStep() {
+        return new StepBuilder("deleteOrphanS3FilesStep", jobRepository)
+                .tasklet((contribution, chunkContext) -> {
+                    try {
+                        Set<String> s3Keys = s3Service.listAllObjectKeysOlderThanDays(1); // 어제 이전 업로드
+                        Set<String> dbKeys = fileRepository.findAll().stream()
+                                .map(file -> {
+                                    String url = file.getFileUrl();
+                                    if (url == null || !url.contains("/")) return url;
+                                    return url.substring(url.lastIndexOf('/') + 1);
+                                })
+                                .collect(Collectors.toSet());
+
+                        s3Keys.removeAll(dbKeys); // DB에 없는 것만 남김
+
+                        for (String orphanKey : s3Keys) {
+                            s3Service.deleteObjectByKey(orphanKey);
+                        }
+                        System.out.println("✅ 유령 파일 정리 완료: " + s3Keys.size() + "건 삭제");
+                    } catch (Exception e) {
+                        System.err.println("❌ 유령 파일 정리 중 오류 발생: " + e.getMessage());
+                    }
+                    return null;
+                }, transactionManager)
                 .build();
     }
 }

@@ -39,11 +39,14 @@ import org.springframework.transaction.annotation.Transactional;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
+import software.amazon.awssdk.services.s3.model.S3Object;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedGetObjectRequest;
 import software.amazon.awssdk.services.s3.presigner.model.PresignedPutObjectRequest;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.UUID;
@@ -370,4 +373,24 @@ public class S3Service {
 
         return FolderLocationResDto.fromEntity(fileEntity.getFolder(), channel);
     }
+
+    public Set<String> listAllObjectKeysOlderThanDays(int days) {
+        return s3Client.listObjectsV2Paginator(b -> b.bucket(bucketName))
+                .contents()
+                .stream()
+                .filter(obj -> obj.lastModified().isBefore(Instant.now().minus(days, ChronoUnit.DAYS)))
+                .map(S3Object::key)
+                .collect(Collectors.toSet());
+    }
+
+    public void deleteObjectByKey(String key) {
+        try {
+            s3Client.deleteObject(b -> b.bucket(bucketName).key(key));
+            log.info("🗑️ S3 객체 삭제 완료: {}", key);
+        } catch (Exception e) {
+            log.error("❌ S3 객체 삭제 실패 ({}): {}", key, e.getMessage());
+        }
+    }
+
+
 }
