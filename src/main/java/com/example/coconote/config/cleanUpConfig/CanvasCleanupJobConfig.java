@@ -7,8 +7,10 @@ import org.springframework.batch.core.Job;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.batch.core.job.builder.JobBuilder;
+import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.core.repository.JobRepository;
 import org.springframework.batch.core.step.builder.StepBuilder;
+import org.springframework.batch.item.Chunk;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.batch.item.database.JpaPagingItemReader;
@@ -17,7 +19,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.batch.core.launch.support.RunIdIncrementer;
 
 import java.time.LocalDateTime;
 import java.util.Collections;
@@ -38,27 +39,27 @@ public class CanvasCleanupJobConfig {
     private EntityManagerFactory entityManagerFactory;
 
     @Bean
-    public Job canvasCleanupJob() {
-        return new JobBuilder("canvasCleanupJob", jobRepository)
+    public Job canvasCleanupChunkPagingJob() {
+        return new JobBuilder("canvasCleanupChunkPagingJob", jobRepository)
                 .incrementer(new RunIdIncrementer())
-                .start(findAndDeleteCanvasesStep())
+                .start(deleteCanvasesWithPagingStep())
                 .build();
     }
 
     @Bean
-    public Step findAndDeleteCanvasesStep() {
-        return new StepBuilder("findAndDeleteCanvasesStep", jobRepository)
+    public Step deleteCanvasesWithPagingStep() {
+        return new StepBuilder("deleteCanvasesWithPagingStep", jobRepository)
                 .<Canvas, Canvas>chunk(10, transactionManager)
-                .reader(canvasReader()) // 매번 새로운 Reader를 생성
-                .processor(canvasProcessor())
-                .writer(canvasWriter())
+                .reader(canvasPagingReader())
+                .processor(passThroughCanvasProcessor())
+                .writer(deleteCanvasEntitiesWriter())
                 .build();
     }
 
     @Bean
-    public JpaPagingItemReader<Canvas> canvasReader() {
+    public JpaPagingItemReader<Canvas> canvasPagingReader() {
         return new JpaPagingItemReaderBuilder<Canvas>()
-                .name("canvasReader")
+                .name("canvasPagingReader")
                 .entityManagerFactory(entityManagerFactory)
                 .queryString("SELECT c FROM Canvas c WHERE c.isDeleted = 'Y' AND c.deletedTime < :oneMonthAgo")
                 .parameterValues(Collections.singletonMap("oneMonthAgo", LocalDateTime.now().minusMonths(1)))
@@ -66,37 +67,32 @@ public class CanvasCleanupJobConfig {
     }
 
     @Bean
-    public ItemProcessor<Canvas, Canvas> canvasProcessor() {
+    public ItemProcessor<Canvas, Canvas> passThroughCanvasProcessor() {
         return canvas -> {
             try {
-                return canvas; // 삭제할 캔버스를 그대로 반환
+                return canvas;
             } catch (Exception e) {
                 System.err.println("Error processing canvas deletion: " + e.getMessage());
-                return null; // 오류 발생 시 이 항목 건너뛰기
+                return null;
             }
         };
     }
 
     @Bean
-    public ItemWriter<Canvas> canvasWriter() {
+    public ItemWriter<Canvas> deleteCanvasEntitiesWriter() {
         return items -> {
             try (EntityManager entityManager = entityManagerFactory.createEntityManager()) {
                 entityManager.getTransaction().begin();
 
-                // 삭제할 캔버스 ID 리스트 수집
                 List<Long> canvasIds = items.getItems().stream()
                         .map(Canvas::getId)
                         .collect(Collectors.toList());
 
-                // 자식 캔버스 먼저 삭제
                 if (!canvasIds.isEmpty()) {
                     entityManager.createQuery("DELETE FROM Canvas c WHERE c.parentCanvas.id IN :ids")
                             .setParameter("ids", canvasIds)
                             .executeUpdate();
-                }
 
-                // 이제 부모 캔버스를 삭제
-                if (!canvasIds.isEmpty()) {
                     entityManager.createQuery("DELETE FROM Canvas c WHERE c.id IN :ids")
                             .setParameter("ids", canvasIds)
                             .executeUpdate();
